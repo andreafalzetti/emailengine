@@ -256,3 +256,49 @@ test('an unreadable file fails closed', async t => {
         delete process.env.EENGINE_PREPARED_PASSWORD_FILE;
     });
 });
+
+// resolveEnvFiles() runs before anything else at startup, and the first record it writes loads
+// lib/logger.js. The logger reads EENGINE_LOG_LEVEL once, as it loads, so the records are held until
+// every file is read: otherwise an EENGINE_SECRET_FILE listed first built the logger before
+// EENGINE_LOG_LEVEL_FILE had been resolved, and the main process logged at the default level.
+test('resolveEnvFiles resolves the logger variables before the logger loads', () => {
+    const dir = fs.mkdtempSync(pathlib.join(os.tmpdir(), 'ee-env-order-'));
+    try {
+        const file = (name, contents) => {
+            const path = pathlib.join(dir, name);
+            fs.writeFileSync(path, contents);
+            return path;
+        };
+        const stdout = execFileSync(
+            process.execPath,
+            [
+                '-e',
+                "require('./lib/read-env-value').resolveEnvFiles(); const logger = require('./lib/logger'); process.stdout.write('\\n' + JSON.stringify({ probeLevel: logger.level }) + '\\n');"
+            ],
+            {
+                cwd: ROOT,
+                encoding: 'utf-8',
+                // insertion order is the order resolveEnvFiles() walks them in
+                env: {
+                    PATH: process.env.PATH,
+                    HOME: process.env.HOME,
+                    NODE_ENV: 'test',
+                    EE_ENV_LOADED: 'true',
+                    EENGINE_SECRET_FILE: file('secret.txt', 's3cret\n'),
+                    EENGINE_LOG_LEVEL_FILE: file('level.txt', 'debug\n')
+                }
+            }
+        );
+        const records = stdout
+            .split('\n')
+            .filter(line => line.startsWith('{'))
+            .map(line => JSON.parse(line));
+
+        const probe = records.find(entry => 'probeLevel' in entry);
+        assert.equal(probe.probeLevel, 'debug', 'the logger is built with the level from the file');
+        // the held records are still written, at the configured level, so the trace ones are dropped
+        assert.ok(!records.some(entry => entry.msg === 'Loaded environment value from file'));
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
