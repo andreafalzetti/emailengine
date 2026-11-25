@@ -19,11 +19,13 @@ const pathlib = require('path');
 
 const ROOT = pathlib.join(__dirname, '..');
 
-// The one module that does not use the helper: lib/logger.js reads the log level while it builds the
-// logger the helper reports through. lib/consts.js used to be exempt as well, which left
+// The modules that do not use the helper, because they build the logger the helper reports through:
+// lib/logger.js reads the log level and lib/logger-consts.js the headers to redact. Their file forms
+// still work, since resolveEnvFiles() writes every file-backed value into process.env before it lets
+// the first record load the logger. lib/consts.js used to be exempt as well, which left
 // EENGINE_REDIS_PREFIX, EENGINE_FETCH_TIMEOUT and the TLS and ACME defaults without a working file
 // form; the helper now loads the logger on first use instead of up front, so it can read them too.
-const EXEMPT_FILES = new Set(['lib/logger.js']);
+const EXEMPT_FILES = new Set(['lib/logger.js', 'lib/logger-consts.js']);
 
 // A write, a delete, or the helper's own fallback read
 const ALLOWED_CONTEXT = /^\s*(=[^=]|\?\?=)/;

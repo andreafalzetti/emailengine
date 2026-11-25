@@ -302,3 +302,49 @@ test('resolveEnvFiles resolves the logger variables before the logger loads', ()
         fs.rmSync(dir, { recursive: true, force: true });
     }
 });
+
+// The same ordering for the headers to redact: lib/logger-consts.js reads EENGINE_LOG_REDACT_HEADERS
+// once, as the logger loads, so its file form only works because resolveEnvFiles() holds its records.
+test('resolveEnvFiles resolves the headers to redact before the logger loads', () => {
+    const dir = fs.mkdtempSync(pathlib.join(os.tmpdir(), 'ee-env-order-'));
+    try {
+        const file = (name, contents) => {
+            const path = pathlib.join(dir, name);
+            fs.writeFileSync(path, contents);
+            return path;
+        };
+        const stdout = execFileSync(
+            process.execPath,
+            [
+                '-e',
+                "require('./lib/read-env-value').resolveEnvFiles(); require('./lib/logger').info({ msg: 'probe', req: { headers: { 'x-proxy-auth': 'header-secret' } } });"
+            ],
+            {
+                cwd: ROOT,
+                encoding: 'utf-8',
+                // insertion order is the order resolveEnvFiles() walks them in
+                env: {
+                    PATH: process.env.PATH,
+                    HOME: process.env.HOME,
+                    NODE_ENV: 'test',
+                    EE_ENV_LOADED: 'true',
+                    EENGINE_SECRET_FILE: file('secret.txt', 's3cret\n'),
+                    EENGINE_LOG_REDACT_HEADERS_FILE: file('headers.txt', 'x-proxy-auth\n')
+                }
+            }
+        );
+        const records = stdout
+            .split('\n')
+            .filter(line => line.startsWith('{'))
+            .map(line => JSON.parse(line));
+
+        const probe = records.find(entry => entry.msg === 'probe');
+        assert.equal(probe.req.headers['x-proxy-auth'], '[Redacted]');
+        assert.ok(!stdout.includes('header-secret'));
+        // the held records are still written, once each
+        const loaded = records.filter(entry => entry.msg === 'Loaded environment value from file').map(entry => entry.key);
+        assert.deepEqual(loaded, ['EENGINE_SECRET', 'EENGINE_LOG_REDACT_HEADERS']);
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});

@@ -15,8 +15,9 @@ const pino = require('pino');
 
 const requestLogger = require('../lib/hapi-request-logger');
 const { REDACTED_LOG_KEYS } = require('../lib/consts');
+const { headerRedactionPaths } = require('../lib/logger-consts');
 
-async function startServer(routes) {
+async function startServer(routes, redact = REDACTED_LOG_KEYS) {
     const records = [];
     const stream = new Writable({
         write(chunk, encoding, callback) {
@@ -24,10 +25,10 @@ async function startServer(routes) {
             callback();
         }
     });
-    const base = pino({ redact: REDACTED_LOG_KEYS, level: 'trace' }, stream);
+    const base = pino({ redact, level: 'trace' }, stream);
 
     const server = Hapi.server({ port: 0, host: '127.0.0.1' });
-    await server.register({ plugin: requestLogger, options: { logger: base.child({ component: 'api' }, { redact: REDACTED_LOG_KEYS }) } });
+    await server.register({ plugin: requestLogger, options: { logger: base.child({ component: 'api' }, { redact }) } });
     server.route(routes);
     await server.start();
 
@@ -197,4 +198,34 @@ test('request logger', async t => {
         assert.ok(record);
         assert.strictEqual(record.level, 30);
     });
+});
+
+// EENGINE_LOG_REDACT_HEADERS adds its paths to REDACTED_LOG_KEYS, the list workers/api.js hands this
+// child logger. The child's own redact option replaces the root logger's, so the request records are
+// only clean if the operator's headers are in that one list.
+test('request logger redacts the headers named in EENGINE_LOG_REDACT_HEADERS', async t => {
+    const { server, records, url } = await startServer(
+        [
+            {
+                method: 'GET',
+                path: '/guarded',
+                handler: request => {
+                    request.logger.info({ msg: 'guarded handler' });
+                    return 'ok';
+                }
+            }
+        ],
+        [...REDACTED_LOG_KEYS, ...headerRedactionPaths('X-Proxy-Auth')]
+    );
+    t.after(() => server.stop());
+
+    await fetch(`${url}/guarded`, { headers: { 'X-Proxy-Auth': 'proxy-shared-secret', 'x-other': 'kept' } });
+
+    const inside = await waitFor(records, r => r.msg === 'guarded handler');
+    const response = await waitFor(records, isResponse('/guarded'));
+    for (const record of [inside, response]) {
+        assert.strictEqual(record.req.headers['x-proxy-auth'], '[Redacted]');
+        assert.strictEqual(record.req.headers['x-other'], 'kept', 'only the named header is redacted');
+    }
+    assert.ok(!JSON.stringify(records).includes('proxy-shared-secret'));
 });
